@@ -1,16 +1,12 @@
 <?php
-session_start();
-
 $db_host = 'localhost';
 $db_name = 'u82192';
 $db_user = 'u82192';
 $db_pass = '2307509';
 
-$admin_auth = false;
+$auth_ok = false;
 
-if (empty($_SERVER['PHP_AUTH_USER']) || empty($_SERVER['PHP_AUTH_PW'])) {
-    $admin_auth = false;
-} else {
+if (!empty($_SERVER['PHP_AUTH_USER']) && !empty($_SERVER['PHP_AUTH_PW'])) {
     try {
         $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8", $db_user, $db_pass);
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -20,14 +16,14 @@ if (empty($_SERVER['PHP_AUTH_USER']) || empty($_SERVER['PHP_AUTH_PW'])) {
         $admin = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if ($admin && password_verify($_SERVER['PHP_AUTH_PW'], $admin['password_hash'])) {
-            $admin_auth = true;
+            $auth_ok = true;
         }
     } catch(PDOException $e) {
-        $admin_auth = false;
+        $auth_ok = false;
     }
 }
 
-if (!$admin_auth) {
+if (!$auth_ok) {
     header('HTTP/1.1 401 Unauthorized');
     header('WWW-Authenticate: Basic realm="Admin Panel"');
     echo '<h1>401 Требуется авторизация</h1>';
@@ -45,15 +41,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8", $db_user, $db_pass);
             $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
             
-            $stmt = $pdo->prepare("DELETE FROM applications WHERE id = ?");
-            $stmt->execute([$delete_id]);
+            $pdo->prepare("DELETE FROM application_languages WHERE application_id = ?")->execute([$delete_id]);
+            $pdo->prepare("DELETE FROM applications WHERE id = ?")->execute([$delete_id]);
+            
             $message = "Запись #$delete_id успешно удалена";
         } catch(PDOException $e) {
             $error = "Ошибка удаления: " . $e->getMessage();
         }
     }
     
-    if (isset($_POST['edit_id']) && isset($_POST['full_name']) && isset($_POST['phone']) && isset($_POST['email'])) {
+    if (isset($_POST['edit_id']) && isset($_POST['full_name'])) {
         $edit_id = (int)$_POST['edit_id'];
         $full_name = trim($_POST['full_name']);
         $phone = trim($_POST['phone']);
@@ -64,88 +61,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $agreed_to_contract = isset($_POST['agreed_to_contract']) ? 1 : 0;
         $languages = $_POST['languages'] ?? [];
         
-        $edit_errors = [];
-        
-        if (empty($full_name)) {
-            $edit_errors[] = "ФИО обязательно";
-        } elseif (strlen($full_name) > 150) {
-            $edit_errors[] = "ФИО не более 150 символов";
-        } elseif (!preg_match('/^[a-zA-Zа-яА-ЯёЁ\s\-]+$/u', $full_name)) {
-            $edit_errors[] = "ФИО только буквы, пробелы, дефисы";
-        }
-        
-        if (empty($phone)) {
-            $edit_errors[] = "Телефон обязателен";
-        } else {
-            $cleanPhone = preg_replace('/[^0-9+]/', '', $phone);
-            if (strlen($cleanPhone) < 10) {
-                $edit_errors[] = "Телефон минимум 10 цифр";
+        try {
+            $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8", $db_user, $db_pass);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            
+            $pdo->beginTransaction();
+            
+            $stmt = $pdo->prepare("
+                UPDATE applications 
+                SET full_name = ?, phone = ?, email = ?, birth_date = ?, 
+                    gender = ?, biography = ?, agreed_to_contract = ?, is_edited = 1
+                WHERE id = ?
+            ");
+            $stmt->execute([$full_name, $phone, $email, $birth_date, $gender, $biography, $agreed_to_contract, $edit_id]);
+            
+            $pdo->prepare("DELETE FROM application_languages WHERE application_id = ?")->execute([$edit_id]);
+            
+            $lang_stmt = $pdo->prepare("INSERT INTO application_languages (application_id, language_id) VALUES (?, ?)");
+            foreach ($languages as $lang_id) {
+                $lang_stmt->execute([$edit_id, $lang_id]);
             }
-        }
-        
-        if (empty($email)) {
-            $edit_errors[] = "Email обязателен";
-        } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $edit_errors[] = "Неверный формат email";
-        }
-        
-        if (empty($birth_date)) {
-            $edit_errors[] = "Дата рождения обязательна";
-        } else {
-            $birth_timestamp = strtotime($birth_date);
-            if (!$birth_timestamp || $birth_timestamp > time()) {
-                $edit_errors[] = "Некорректная дата";
-            } else {
-                $age = date('Y') - date('Y', $birth_timestamp);
-                if (date('md') < date('md', $birth_timestamp)) $age--;
-                if ($age < 18) $edit_errors[] = "Возраст от 18 лет";
-                if ($age > 100) $edit_errors[] = "Возраст до 100 лет";
-            }
-        }
-        
-        if (!in_array($gender, ['male', 'female', 'other'])) {
-            $edit_errors[] = "Выберите пол";
-        }
-        
-        if (empty($languages)) {
-            $edit_errors[] = "Выберите хотя бы один язык";
-        }
-        
-        if (empty($edit_errors)) {
-            try {
-                $pdo = new PDO("mysql:host=$db_host;dbname=$db_name;charset=utf8", $db_user, $db_pass);
-                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-                
-                $pdo->beginTransaction();
-                
-                $stmt = $pdo->prepare("
-                    UPDATE applications 
-                    SET full_name = ?, phone = ?, email = ?, birth_date = ?, 
-                        gender = ?, biography = ?, agreed_to_contract = ?, is_edited = 1
-                    WHERE id = ?
-                ");
-                $stmt->execute([$full_name, $phone, $email, $birth_date, $gender, $biography, $agreed_to_contract, $edit_id]);
-                
-                $pdo->prepare("DELETE FROM application_languages WHERE application_id = ?")->execute([$edit_id]);
-                
-                $check_stmt = $pdo->prepare("SELECT id FROM programming_languages WHERE id = ?");
-                $lang_stmt = $pdo->prepare("INSERT INTO application_languages (application_id, language_id) VALUES (?, ?)");
-                foreach ($languages as $lang_id) {
-                    $check_stmt->execute([$lang_id]);
-                    if ($check_stmt->fetch()) {
-                        $lang_stmt->execute([$edit_id, $lang_id]);
-                    }
-                }
-                
-                $pdo->commit();
-                $message = "Запись #$edit_id успешно обновлена";
-                
-            } catch(PDOException $e) {
+            
+            $pdo->commit();
+            $message = "Запись #$edit_id успешно обновлена";
+            
+        } catch(PDOException $e) {
+            if (isset($pdo) && $pdo->inTransaction()) {
                 $pdo->rollBack();
-                $error = "Ошибка обновления: " . $e->getMessage();
             }
-        } else {
-            $error = implode(", ", $edit_errors);
+            $error = "Ошибка обновления: " . $e->getMessage();
         }
     }
 }
@@ -164,7 +108,7 @@ try {
         ORDER BY a.id DESC
     ")->fetchAll(PDO::FETCH_ASSOC);
     
-    $languages = $pdo->query("SELECT id, language_name FROM programming_languages ORDER BY language_name")->fetchAll(PDO::FETCH_ASSOC);
+    $languages_list = $pdo->query("SELECT id, language_name FROM programming_languages ORDER BY language_name")->fetchAll(PDO::FETCH_ASSOC);
     
     $language_stats = $pdo->query("
         SELECT pl.id, pl.language_name, COUNT(al.application_id) as user_count
@@ -178,6 +122,13 @@ try {
     
 } catch(PDOException $e) {
     die("Ошибка базы данных: " . $e->getMessage());
+}
+
+$user_languages = [];
+foreach ($applications as $app) {
+    $stmt = $pdo->prepare("SELECT language_id FROM application_languages WHERE application_id = ?");
+    $stmt->execute([$app['id']]);
+    $user_languages[$app['id']] = $stmt->fetchAll(PDO::FETCH_COLUMN);
 }
 ?>
 <!DOCTYPE html>
@@ -255,7 +206,7 @@ try {
         
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
             gap: 15px;
         }
         
@@ -274,7 +225,7 @@ try {
         }
         
         .stat-card .count {
-            font-size: 36px;
+            font-size: 32px;
             font-weight: bold;
             color: #667eea;
         }
@@ -301,9 +252,10 @@ try {
         
         th, td {
             border: 1px solid #ddd;
-            padding: 12px;
+            padding: 10px;
             text-align: left;
             vertical-align: top;
+            font-size: 13px;
         }
         
         th {
@@ -315,53 +267,13 @@ try {
             background: #f9f9f9;
         }
         
-        .edit-form {
-            background: #f5f5f5;
-            padding: 20px;
-            border-radius: 10px;
-            margin-top: 20px;
-        }
-        
-        .edit-form h3 {
-            margin-bottom: 15px;
-        }
-        
-        .edit-form .form-row {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-            gap: 15px;
-            margin-bottom: 15px;
-        }
-        
-        .edit-form label {
-            display: block;
-            font-weight: bold;
-            margin-bottom: 5px;
-            font-size: 12px;
-        }
-        
-        .edit-form input, .edit-form select, .edit-form textarea {
-            width: 100%;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-        }
-        
-        .edit-form select[multiple] {
-            height: 100px;
-        }
-        
         .btn {
-            padding: 8px 15px;
+            padding: 5px 10px;
             border: none;
             border-radius: 5px;
             cursor: pointer;
-            font-size: 12px;
-            transition: transform 0.2s;
-        }
-        
-        .btn:hover {
-            transform: translateY(-1px);
+            font-size: 14px;
+            margin: 2px;
         }
         
         .btn-edit {
@@ -371,17 +283,6 @@ try {
         
         .btn-delete {
             background: #f44336;
-            color: white;
-        }
-        
-        .btn-save {
-            background: #2196f3;
-            color: white;
-            padding: 10px 20px;
-        }
-        
-        .btn-cancel {
-            background: #999;
             color: white;
         }
         
@@ -420,7 +321,7 @@ try {
             margin: 50px auto;
             padding: 30px;
             width: 90%;
-            max-width: 800px;
+            max-width: 700px;
             border-radius: 10px;
             position: relative;
         }
@@ -433,15 +334,46 @@ try {
             cursor: pointer;
         }
         
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-group label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            font-size: 12px;
+        }
+        
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        
+        .form-group select[multiple] {
+            height: 100px;
+        }
+        
+        .btn-save {
+            background: #2196f3;
+            color: white;
+            padding: 10px 20px;
+        }
+        
+        .btn-cancel {
+            background: #999;
+            color: white;
+        }
+        
         @media (max-width: 768px) {
             .content {
                 padding: 15px;
             }
-            table {
-                font-size: 12px;
-            }
             th, td {
-                padding: 8px;
+                font-size: 11px;
+                padding: 5px;
             }
         }
     </style>
@@ -449,7 +381,7 @@ try {
 <body>
     <div class="container">
         <div class="header">
-            <h1>👑 Панель администратора</h1>
+            <h1>Панель администратора</h1>
             <a href="logout_admin.php" class="logout-btn">Выйти</a>
         </div>
         
@@ -468,7 +400,7 @@ try {
             </div>
             
             <div class="stats-section">
-                <h2>📊 Статистика по языкам программирования</h2>
+                <h2>Статистика по языкам программирования</h2>
                 <div class="stats-grid">
                     <?php foreach ($language_stats as $stat): ?>
                         <div class="stat-card">
@@ -479,7 +411,7 @@ try {
                 </div>
             </div>
             
-            <h2>📋 Все пользователи</h2>
+            <h2>Все пользователи</h2>
             
             <table>
                 <thead>
@@ -488,13 +420,9 @@ try {
                         <th>ФИО</th>
                         <th>Телефон</th>
                         <th>Email</th>
-                        <th>Дата рождения</th>
+                        <th>Дата рожд.</th>
                         <th>Пол</th>
                         <th>Языки</th>
-                        <th>Биография</th>
-                        <th>Контракт</th>
-                        <th>Логин</th>
-                        <th>Редактировалось</th>
                         <th>Действия</th>
                     </tr>
                 </thead>
@@ -513,15 +441,11 @@ try {
                                 ?>
                             </td>
                             <td><?= htmlspecialchars($app['languages'] ?? '-') ?></td>
-                            <td><?= htmlspecialchars(mb_substr($app['biography'] ?? '', 0, 50)) ?>...</td>
-                            <td><?= $app['agreed_to_contract'] ? '✅' : '❌' ?></td>
-                            <td><?= htmlspecialchars($app['login'] ?? '-') ?></td>
-                            <td><?= $app['is_edited'] ? '✅' : '❌' ?></td>
                             <td>
-                                <button class="btn btn-edit" onclick="openEditModal(<?= $app['id'] ?>)">✏️</button>
+                                <button class="btn btn-edit" onclick="openEditModal(<?= $app['id'] ?>)">Редактировать</button>
                                 <form method="POST" style="display: inline;" onsubmit="return confirm('Удалить запись #<?= $app['id'] ?>?')">
                                     <input type="hidden" name="delete_id" value="<?= $app['id'] ?>">
-                                    <button type="submit" class="btn btn-delete">🗑️</button>
+                                    <button type="submit" class="btn btn-delete">Удалить</button>
                                 </form>
                             </td>
                         </tr>
@@ -534,7 +458,7 @@ try {
     <div id="editModal" class="modal">
         <div class="modal-content">
             <span class="close-modal" onclick="closeEditModal()">&times;</span>
-            <h3>✏️ Редактирование пользователя</h3>
+            <h3>Редактирование пользователя</h3>
             <form method="POST" id="editForm">
                 <input type="hidden" name="edit_id" id="edit_id">
                 
@@ -553,25 +477,24 @@ try {
                     <input type="email" name="email" id="edit_email" required>
                 </div>
                 
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>Дата рождения *</label>
-                        <input type="date" name="birth_date" id="edit_birth_date" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Пол *</label>
-                        <select name="gender" id="edit_gender" required>
-                            <option value="male">Мужской</option>
-                            <option value="female">Женский</option>
-                            <option value="other">Другой</option>
-                        </select>
-                    </div>
+                <div class="form-group">
+                    <label>Дата рождения *</label>
+                    <input type="date" name="birth_date" id="edit_birth_date" required>
+                </div>
+                
+                <div class="form-group">
+                    <label>Пол *</label>
+                    <select name="gender" id="edit_gender" required>
+                        <option value="male">Мужской</option>
+                        <option value="female">Женский</option>
+                        <option value="other">Другой</option>
+                    </select>
                 </div>
                 
                 <div class="form-group">
                     <label>Любимые языки программирования *</label>
                     <select name="languages[]" multiple id="edit_languages" size="6">
-                        <?php foreach ($languages as $lang): ?>
+                        <?php foreach ($languages_list as $lang): ?>
                             <option value="<?= $lang['id'] ?>"><?= htmlspecialchars($lang['language_name']) ?></option>
                         <?php endforeach; ?>
                     </select>
@@ -582,7 +505,7 @@ try {
                     <textarea name="biography" id="edit_biography" rows="3"></textarea>
                 </div>
                 
-                <div class="checkbox-group">
+                <div class="form-group">
                     <label>
                         <input type="checkbox" name="agreed_to_contract" value="1" id="edit_agreed">
                         Я ознакомлен(а) с условиями контракта
@@ -596,13 +519,10 @@ try {
     </div>
     
     <script>
+        const userLanguages = <?php echo json_encode($user_languages); ?>;
         const applicationsData = <?php
             $data = [];
             foreach ($applications as $app) {
-                $lang_ids = [];
-                $stmt = $pdo->prepare("SELECT language_id FROM application_languages WHERE application_id = ?");
-                $stmt->execute([$app['id']]);
-                $lang_ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
                 $data[$app['id']] = [
                     'full_name' => $app['full_name'],
                     'phone' => $app['phone'],
@@ -610,8 +530,7 @@ try {
                     'birth_date' => $app['birth_date'],
                     'gender' => $app['gender'],
                     'biography' => $app['biography'] ?? '',
-                    'agreed_to_contract' => $app['agreed_to_contract'],
-                    'languages' => $lang_ids
+                    'agreed_to_contract' => $app['agreed_to_contract']
                 ];
             }
             echo json_encode($data);
@@ -630,8 +549,9 @@ try {
                 document.getElementById('edit_agreed').checked = data.agreed_to_contract == 1;
                 
                 const select = document.getElementById('edit_languages');
+                const selectedLangs = userLanguages[id] || [];
                 for (let i = 0; i < select.options.length; i++) {
-                    select.options[i].selected = data.languages.includes(parseInt(select.options[i].value));
+                    select.options[i].selected = selectedLangs.includes(parseInt(select.options[i].value));
                 }
                 
                 document.getElementById('editModal').style.display = 'block';
